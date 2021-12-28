@@ -84,7 +84,8 @@ for idx in np.arange(10):
     ax = fig.add_subplot(2, 20/2, idx+1, xticks=[], yticks=[])
     imshow(images[idx])
     ax.set_title(classes[labels[idx]])
-plt.show()
+#plt.show()
+plt.close()
 
 
 #####################################################################################################
@@ -92,45 +93,10 @@ plt.show()
 #####################################################################################################
 
 import torch.nn as nn
-import torch.nn.functional as F
+import CNN
 
-# define CNN Architecture
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        # conv layer
-        # sees 24x24 x3 (RGB)
-        self.conv1 = nn.Conv2d(3, 16, 3, padding=1) # in depth = 3, out depth = 16, ksize = 3, padding 1, stride 1 (default)
-        
-        # sees 12x12 x16
-        self.conv2 = nn.Conv2d(16, 32, 3, padding=1) # in depth = 16, out depth = 32, ksize = 3, padding 1, stride 1
-
-        # sees 6x6 x32
-        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
-        
-        # final out of conv: 3x3 x64
-
-        self.fc1 = nn.Linear(3*3*64, 100, bias=True)
-        self.fc2 = nn.Linear(100, 2, bias=True)
-        self.dropout = nn.Dropout(p=0.25)
-
-        self.pool = nn.MaxPool2d(2, 2)
-        
-    def forward(self, x):
-        
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = self.pool(F.relu(self.conv3(x)))
-
-        x = x.view(-1, 3*3*64)
-
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.fc2(x)
-
-        return x
-
-model = Net()
-print(model)
+model = CNN.Net()
+#print(model)
 
 if train_on_gpu:
     model.cuda()
@@ -138,24 +104,24 @@ if train_on_gpu:
 # loss func and optimizer
 import torch.optim as optim
 
-criterion = nn.CrossEntropyLoss()
+criterion = nn.NLLLoss()
 optimizer = optim.Adam(model.parameters(), lr = 0.001)
-#####################################################################################################
-#                                   END OF NEURAL NETWORK CLASS                                     #
-#####################################################################################################
-
-
 
 #####################################################################################################
 #                                        START OF TRAINING                                          #
 #####################################################################################################
 
-num_epochs = 10
+num_epochs = 30
 valid_loss_min = np.Inf
 
+valid_losses = []
+train_losses = []
+test_losses = []
+accuracies = []
 for epoch in range(1, num_epochs+1):
     train_loss = 0
     valid_loss = 0
+    test_loss = 0
 
     ##### TRANING STEP #####
     model.train()       # switch model modes
@@ -166,7 +132,7 @@ for epoch in range(1, num_epochs+1):
         # clear grads
         optimizer.zero_grad()
 
-        model_pred = model(data)
+        model_pred = model.forward(data)
         loss = criterion(model_pred, labels)
         loss.backward()
         optimizer.step()
@@ -183,12 +149,56 @@ for epoch in range(1, num_epochs+1):
         valid_loss += loss.item() * data.size(0)
 
     # calculate average losses
-    train_loss = train_loss/len(train_loader.dataset)
-    valid_loss = valid_loss/len(valid_loss.dataset)
+    train_loss = train_loss/len(train_loader.sampler)
+    valid_loss = valid_loss/len(valid_loader.sampler)
 
-    print('Epoch: {} \nTraining Loss: {:.5f} \nValidation Loss: {:.5f}'.format(epoch, train_loss, valid_loss))
+    train_losses.append(train_loss)
+    valid_losses.append(valid_loss)
+
+    with torch.no_grad():
+        test_loss = 0
+        accuracy = 0
+        model.eval()
+        for data, labels in test_loader:
+            if train_on_gpu:
+                data, labels = data.cuda(), labels.cuda()
+            
+            log_ps = model.forward(data)
+            loss = criterion(log_ps, labels)
+            test_loss += loss
+
+            ps = torch.exp(log_ps)   # since models output is log soft max, need to exp to get P
+            top_p, top_class = ps.topk(1, dim=1)
+            equals = top_class == labels.view(*top_class.shape)
+            accuracy += torch.mean(equals.type(torch.FloatTensor))
+
+    model.train()
+
+    test_losses.append(test_loss/len(test_loader))
+    accuracies.append(accuracy/len(test_loader))
+
+    print('\nEpoch: {} \nTraining Loss: {:.5f} \nValidation Loss: {:.5f}\nTest Loss: {:.5f}\nAccuracy: {:.3f}'.format(epoch,
+     train_loss, valid_loss, test_loss, accuracies[-1]))
 
     if valid_loss <= valid_loss_min:
         print('Validation loss decreased ({:.6f} --> {:.6f}).  Saving model ...'.format(valid_loss_min, valid_loss))
         torch.save(model.state_dict(), 'model_eyes.pt')
         valid_loss_min = valid_loss
+
+# GRAPH Training loss 
+f1 = plt.figure()
+plt.plot(train_losses, label='Training loss')
+plt.plot(valid_losses, label='Validation loss')
+plt.legend(frameon=False)
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.show()
+plt.savefig('training_vs_validation_loss.png')
+
+f2 = plt.figure()
+plt.plot(accuracies, label='Accuracy')
+plt.legend(frameon=False)
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.show()
+plt.savefig('training_accuracy.png')
