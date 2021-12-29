@@ -1,10 +1,12 @@
 import cv2
 import os
-import numpy as np
-from pygame import mixer
-import time
 import torch
 import CNN
+from pygame import mixer
+from torchvision import transforms
+from PIL import Image
+from torch.autograd import Variable as V
+
 
 
 state_dict = torch.load('model_eyes.pt')
@@ -13,23 +15,24 @@ state_dict = torch.load('model_eyes.pt')
 Model = CNN.Net()
 
 Model.load_state_dict(state_dict)
+Model.eval()
 
-print(Model)
+for param in Model.parameters():
+    param.requires_grad = False
+
+#print(Model)
 
 
-
-# Initialize alarm sound
 mixer.init()
 sound = mixer.Sound('alarm.wav')
 
 # Initialize xml directories for face/eyes haar CascadeClassifier
-face_classifier = cv2.CascadeClassifier('haar cascade files\haarcascade_frontalface_alt.xml')
-lefteye_classifier = cv2.CascadeClassifier('haar cascade files\haarcascade_lefteye_2splits.xml')
-righteye_classifer = cv2.CascadeClassifier('haar cascade files\haarcascade_righteye_2splits.xml')
+face_classifier = cv2.CascadeClassifier('haar_cascade_files\haarcascade_frontalface_alt.xml')
+lefteye_classifier = cv2.CascadeClassifier('haar_cascade_files\haarcascade_lefteye_2splits.xml')
+righteye_classifer = cv2.CascadeClassifier('haar_cascade_files\haarcascade_righteye_2splits.xml')
 
 
 labels=['Close','Open']
-
 
 path = os.getcwd()
 
@@ -37,91 +40,90 @@ path = os.getcwd()
 capture = cv2.VideoCapture(0)
 
 font = cv2.FONT_HERSHEY_COMPLEX_SMALL
-count=0
-score=0
+score = 0
 thicc=2
-rpred=[99]
-lpred=[99]
-
-
-### DETECTION LOOP
+rpred = None
+lpred = None
 
 while(True):    # Infinite loop to continually get updates from webcam.
     ret, frame = capture.read()     # get frame data and store as img (frame is an image type)
+    if not ret:
+        break
     height,width = frame.shape[:2] 
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # convert cam data to grayscale
-    
-    # Detect faces/eyes ROI 
-    faces = face_classifier.detectMultiScale(gray,minNeighbors=5,scaleFactor=1.1,minSize=(25,25))
-    left_eye = lefteye_classifier.detectMultiScale(gray)
-    right_eye =  righteye_classifer.detectMultiScale(gray)
+    img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # convert cam data to RGB! 
+    img = transforms.ToTensor()(img) # now looks like C X H X W
+    #print(img.shape)            # img : tensor : 3 x 480 x 640 (C X H X W)
+    #print(frame.shape)          # frame: image : H X W X C
 
-    cv2.rectangle(frame, (0,height-50) , (200,height) , (0,0,0) , thickness=cv2.FILLED )
+    # Detect faces/eyes ROI 
+    faces = face_classifier.detectMultiScale(frame, minNeighbors = 5, scaleFactor = 1.1, minSize = (25,25))
+    left_eye = lefteye_classifier.detectMultiScale(frame)
+    right_eye =  righteye_classifer.detectMultiScale(frame)
+
+    eyetrans = transforms.Compose([transforms.Resize(24), 
+                                    transforms.ToTensor(), 
+                                    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
+                                    
+    cv2.rectangle(frame, (0, height - 50) , (200, height) , (0, 0, 0) , thickness=cv2.FILLED )
 
     # Draw rectangle around face ROI
-    for (x,y,w,h) in faces:
-        cv2.rectangle(frame, (x,y) , (x+w,y+h) , (100,100,100) , 1 )
+    for (x, y, w, h) in faces:
+        cv2.rectangle(frame, (x, y) , (x+w, y+h) , (100, 100, 100) , 1 )
 
     # Draw rectangle around right eye and classify eye as open/closed
-    for (x,y,w,h) in right_eye:
-        cv2.rectangle(frame, (x,y), (x+w, y+h), (0,0,255), 1)
-        r_eye=frame[y:y+h,x:x+w]
-        count=count+1
-        r_eye = cv2.cvtColor(r_eye,cv2.COLOR_BGR2GRAY)
-        r_eye = cv2.resize(r_eye,(24,24))
-        r_eye= r_eye/255
-        r_eye=  r_eye.reshape(24,24,-1)
-        r_eye = np.expand_dims(r_eye,axis=0)
-        #rpred = model.predict(r_eye)
-        rpred = (Model.predict(r_eye) > 0.5)#.astype("int")
-        if(rpred[0][0] == 0):
-            labels='Open'
-            #print('right eye open')
-        if(rpred[0][0] == 1):
-            labels='Closed'
-            #print('right eye closed')
+    for (x, y, w, h) in right_eye:
+        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 1)
+        r_eye = frame[y:y+h, x:x+w]     
+        guh = Image.fromarray(r_eye)
+        guh.save('test_righteye.jpg')
+        #print(r_eye.shape)          # r_eye is an IMG H X W X C
+        r_eye = eyetrans(Image.fromarray(r_eye)) 
+        #print(r_eye.shape)          # r_eye is NOW an 
+        
+        rpred = Model.forward(V(r_eye.unsqueeze(0)))
+        ps = torch.exp(rpred)
+        #print(ps)
+        top_p, top_class = ps.topk(1, dim=1)    # first index is closed true, second is open true
+        r_labels = 'closed' if top_class == 0 else 'open'
+        print('Right eye: ', r_labels)
         break
 
     for (x,y,w,h) in left_eye:
-        l_eye=frame[y:y+h,x:x+w]
-        cv2.rectangle(frame, (x,y), (x+w, y+h), (0,255,0), 1)
-        count=count+1
-        l_eye = cv2.cvtColor(l_eye,cv2.COLOR_BGR2GRAY)  
-        l_eye = cv2.resize(l_eye,(24,24))
-        l_eye= l_eye/255
-        l_eye=l_eye.reshape(24,24,-1)
-        l_eye = np.expand_dims(l_eye,axis=0)
-        #lpred = model.predict(l_eye)
-        lpred = (Model.predict(l_eye) > 0.5)
-
-        if(lpred[0][0]==0):
-            labels='Open'  
-            print('left eye open') 
-        if(lpred[0][0]==1):
-            labels='Closed'
-            print('left eye closed')
+        cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 0, 255), 1)
+        l_eye = frame[y:y+h, x:x+w]     
+        guh = Image.fromarray(l_eye)
+        guh.save('test_lefteye.jpg')
+        #print(l_eye.shape)          # l_eye is an IMG H X W X C
+        l_eye = eyetrans(Image.fromarray(l_eye)) 
+        #print(l_eye.shape)          # l_eye is NOW a PIL image
+        
+        lpred = Model.forward(V(l_eye.unsqueeze(0)))
+        ps = torch.exp(lpred)   # probabilities are model exponentized
+        #print(ps)
+        top_p, top_class = ps.topk(1, dim=1)    # first index is closed true, second is open true
+        l_labels = 'closed' if top_class == 0 else 'open'
+        print('Left eye: ', l_labels)
         break
-
-    if(rpred[0][0]==1 and lpred[0][0]==1):
+    
+    if(l_labels == 'closed' and r_labels == 'closed'):
         score += 1
-        cv2.putText(frame,"Closed",(10,height-20), font, 1,(255,255,255),1,cv2.LINE_AA)
-    # if(rpred[0]==1 or lpred[0]==1):
+        cv2.putText(frame, "Eyes Closed", (10, height - 20), font, 1, (255, 255, 255), 1, cv2.LINE_AA)
     else:
         score -= 1
-        cv2.putText(frame,"Open",(10,height-20), font, 1,(255,255,255),1,cv2.LINE_AA)
+        cv2.putText(frame, "Eyes Open", (10, height - 20), font, 1, (255, 255, 255), 1, cv2.LINE_AA)
     
     # Reset score to 0 if eyes remain open for long periods of time
-    if(score<0):
+    if(score < 0):
         score = 0
 
     # Display score
-    cv2.putText(frame,'Score:'+str(score),(100,height-20), font, 1,(255,255,255),1,cv2.LINE_AA)
+    cv2.putText(frame, 'Drowsy Score:'+str(score), (100, height - 20), font, 1, (255, 255, 255), 1, cv2.LINE_AA)
 
     # Alarm control
-    if(score>15):
+    if(score > 15):
         #person is feeling sleepy so we beep the alarm
-        cv2.imwrite(os.path.join(path,'image.jpg'),frame)
+        cv2.imwrite(os.path.join(path, 'image.jpg'), frame)
         try:
             sound.play()
             
